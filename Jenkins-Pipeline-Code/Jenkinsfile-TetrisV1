@@ -1,133 +1,155 @@
 pipeline {
     agent any
+
     tools {
         nodejs 'nodejs'
     }
-    environment  {
-        SCANNER_HOME=tool 'sonar-scanner'
+
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+        AWS_REGION = "us-east-1"
+        GIT_REPO_NAME = "End-to-End-Kubernetes-DevSecOps-Tetris-Project"
+        GIT_USER_NAME = "rk4027-N"
     }
+
     stages {
-        stage('Cleaning Workspace') {
+
+        stage('Clean Workspace') {
+            steps { cleanWs() }
+        }
+
+        stage('Checkout Code') {
             steps {
-                cleanWs()
+                git branch: 'main',
+                url: 'https://github.com/rk4027-N/End-to-End-Kubernetes-DevSecOps-Tetris-Project.git'
             }
         }
-        stage('Checkout from Git') {
-            steps {
-                git branch: 'master', url: 'https://github.com/rk4027-N/End-to-End-Kubernetes-DevSecOps-Tetris-Project.git'
-            }
-        }
-        stage('Sonarqube Analysis') {
+
+        stage('SonarQube Analysis') {
             steps {
                 dir('Tetris-V1') {
                     withSonarQubeEnv('sonar-scanner') {
-                        sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Tetris \
-                        -Dsonar.projectKey=Tetris '''
+                        sh """
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectName=Tetris \
+                        -Dsonar.projectKey=Tetris
+                        """
                     }
                 }
             }
         }
-        stage('Quality Check') {
+
+        stage('Quality Gate') {
             steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'sonarqube-token'
-                }
+                waitForQualityGate abortPipeline: true
             }
         }
-        stage('Installing Dependencies') {
+
+        stage('Install Dependencies') {
             steps {
                 dir('Tetris-V1') {
                     sh 'npm install'
                 }
             }
         }
-        stage('OWASP Dependency-Check Scan') {
+
+        stage('OWASP Dependency Check') {
             steps {
                 dir('Tetris-V1') {
-                    dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
-                    dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                    dependencyCheck additionalArguments: '--scan ./',
+                    odcInstallation: 'DP-Check'
                 }
             }
         }
-        stage('Trivy File Scan') {
+
+        stage('Trivy Filesystem Scan') {
             steps {
                 dir('Tetris-V1') {
-                    sh 'trivy fs . > trivyfs.txt'
+                    sh 'trivy fs .'
                 }
             }
         }
-        stage("Docker Image Build") {
-    steps {
-        script {
-            def awsRegion = "us-east-1"
-            def awsAccountId = sh(
-                script: "aws sts get-caller-identity --query Account --output text",
-                returnStdout: true
-            ).trim()
 
-            def ecrRepo = "${awsAccountId}.dkr.ecr.${awsRegion}.amazonaws.com/tetrisv1"
-
-            dir('Tetris-V1') {
-                sh '''
-                    docker system prune -f
-                    docker build -t tetrisv1:${BUILD_NUMBER} .
-                '''
-
-                sh """
-                    docker tag tetrisv1:${BUILD_NUMBER} ${ecrRepo}:${BUILD_NUMBER}
-                """
-            }
-        }
-    }
-}
-        stage("Docker Image Push to ECR") {
-    steps {
-        script {
-            def awsRegion = "us-east-1"
-            def awsAccountId = "984912522187"
-            def ecrRepo = "${awsAccountId}.dkr.ecr.${awsRegion}.amazonaws.com/tetrisv1"
-
-            sh """
-                aws ecr get-login-password --region ${awsRegion} | \
-                docker login --username AWS --password-stdin ${awsAccountId}.dkr.ecr.${awsRegion}.amazonaws.com
-
-                docker tag tetrisv1:${BUILD_NUMBER} ${ecrRepo}:${BUILD_NUMBER}
-
-                docker push ${ecrRepo}:${BUILD_NUMBER}
-            """
-        }
-    }
-}
-        stage("TRIVY Image Scan") {
+        stage('Docker Build') {
             steps {
-                sh 'trivy image avian19/tetrisv1:${BUILD_NUMBER} > trivyimage.txt'
+                script {
+
+                    def awsAccountId = sh(
+                        script: "aws sts get-caller-identity --query Account --output text",
+                        returnStdout: true
+                    ).trim()
+
+                    def ecrRepo = "${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/tetrisv1"
+
+                    dir('Tetris-V1') {
+                        sh """
+                            docker build -t ${ecrRepo}:${BUILD_NUMBER} .
+                        """
+                    }
+                }
             }
         }
-        stage('Checkout Code') {
+
+        stage('Docker Push to ECR') {
             steps {
-                git branch: 'master', url: 'https://github.com/rk4027-N/End-to-End-Kubernetes-DevSecOps-Tetris-Project.git'
+                script {
+
+                    def awsAccountId = sh(
+                        script: "aws sts get-caller-identity --query Account --output text",
+                        returnStdout: true
+                    ).trim()
+
+                    def ecrRepo = "${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/tetrisv1"
+
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com
+
+                        docker push ${ecrRepo}:${BUILD_NUMBER}
+                    """
+                }
             }
         }
-        stage('Update Deployment file') {
-            environment {
-                GIT_REPO_NAME = "End-to-End-Kubernetes-DevSecOps-Tetris-Project"
-                GIT_USER_NAME = "rk4027-N"
+
+        stage('Trivy Image Scan') {
+            steps {
+                script {
+                    def awsAccountId = sh(
+                        script: "aws sts get-caller-identity --query Account --output text",
+                        returnStdout: true
+                    ).trim()
+
+                    def ecrRepo = "${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/tetrisv1"
+
+                    sh "trivy image ${ecrRepo}:${BUILD_NUMBER}"
+                }
             }
+        }
+
+        stage('Update Kubernetes Manifest (GitOps)') {
             steps {
                 dir('Manifest-file') {
-                    withCredentials([string(credentialsId: 'github', variable: 'GITHUB_TOKEN')]) {
-                        sh '''
-                            git config user.email "gudalarajkumar@gmail.com"
-                            git config user.name "rknani"
-                            BUILD_NUMBER=${BUILD_NUMBER}
-                            echo $BUILD_NUMBER
-                            imageTag=$(grep -oP '(?<=tetrisv1:)[^ ]+' deployment-service.yml)
-                            echo $imageTag
-                            sed -i "s/tetrisv1:${imageTag}/tetrisv1:${BUILD_NUMBER}/" deployment-service.yml
-                            git add deployment-service.yml
-                            git commit -m "Update deployment Image to version \${BUILD_NUMBER}"
-                            git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:master
-                        '''
+                    withCredentials([string(credentialsId: 'Github', variable: 'GITHUB_TOKEN')]) {
+                        script {
+
+                            def awsAccountId = sh(
+                                script: "aws sts get-caller-identity --query Account --output text",
+                                returnStdout: true
+                            ).trim()
+
+                            def ecrRepo = "${awsAccountId}.dkr.ecr.${AWS_REGION}.amazonaws.com/tetrisv1"
+
+                            sh """
+                                git config user.email "gudalarajkumar@gmail.com"
+                                git config user.name "rknani"
+
+                                sed -i "s|image:.*|image: ${ecrRepo}:${BUILD_NUMBER}|g" deployment-service.yml
+
+                                git add deployment-service.yml
+                                git commit -m "Update image to ${BUILD_NUMBER}"
+                                git push https://${GITHUB_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:main
+                            """
+                        }
                     }
                 }
             }
